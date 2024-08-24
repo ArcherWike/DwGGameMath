@@ -1,0 +1,6 @@
+# Visual Studio 2015 user specific files
+
+
+
+# Don't ignore icon files in Build
+Build/*
