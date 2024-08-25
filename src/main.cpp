@@ -1,9 +1,9 @@
 #include "dwgSimpleGraphics.h"
-
-#include "dwgSimpleGraphics.h"
 #include <assert.h>
 #include <vector>
 #include <windows.h>
+
+# define M_PI           3.14159265358979323846  /* pi */
 
 float RandomRange(float min, float max)
 {
@@ -56,13 +56,55 @@ void LimitVector(Vector3& v, float bounds)
 }
 
 
+//smooth direction
+float unifs(float x)
+{
+	return x * x / (2 * (x * x - x) + 1);
+}
+
+class Obstacle
+{
+public:
+	Obstacle()
+	{
+		m_radious = RandomRange(0.08f, 0.40f);
+		m_position = RandomPosition();
+	};
+
+	float get_radious()
+	{
+		return m_radious;
+	}
+
+	Vector3 get_position()
+	{
+		return m_position;
+	}
+
+	void set_position(Vector3 position)
+	{
+		m_position = position;
+	}
+
+	void draw()
+	{
+		dwgDebugSphere(m_position, Vector3(m_radious, m_radious, 0.09f), Vector3(0.8f, 0.3f, 0.9f));
+	}
+private:
+
+	float m_radious{};
+	Vector3 m_position{};
+};
+
+
 class Flock
 {
 public:
-	Flock(int numPrey, int numPredators)
+	Flock(int numPrey, int numPredators, int numObstacles)
 		: m_numAll(numPrey + numPredators)
 		, m_numPrey(numPrey)
 		, m_numPredators(numPredators)
+		, m_numObstacles(numObstacles)
 	{
 		m_data = new Vector3[m_numAll * 2];
 		m_positions = m_data;
@@ -74,6 +116,10 @@ public:
 			m_positions[i] = RandomPosition();
 			m_velocities[i] = RandomVector2D();
 		}
+
+		// storing obstacles info
+		m_obstaclesData = new Obstacle[m_numObstacles];
+
 	}
 
 	~Flock()
@@ -83,6 +129,7 @@ public:
 
 	void simulate(float dt)
 	{
+		const float minBoxCollisionLength = 2.0f;
 		const float maxPreySpeed = 4.0f;
 		const float maxPredatorSpeed = 6.0f;
 		const float maxPreyDistance = 1.0f;
@@ -94,7 +141,13 @@ public:
 			Vector3 avgPosition = Vector3(0.0f);
 			Vector3 avgVelocity = Vector3(0.0f);
 			Vector3 avgPush = Vector3(0.0f);
+
 			int numNeighbours = 0;
+
+			//detection box length is proportional to boid's velocity
+			float boxCollisionLength = minBoxCollisionLength +
+				(length(m_velocities[i]) / maxPreySpeed) / minBoxCollisionLength;
+
 
 			// iterate over all other prey
 			for (int j = 0; j < m_numPrey; ++j)
@@ -131,12 +184,18 @@ public:
 				}
 			}
 
-			if (numNeighbours == 0)
-				continue;
-
-			avgPosition /= numNeighbours;
-			avgVelocity /= numNeighbours;
-			avgPush /= numNeighbours;
+			if (numNeighbours > 0)
+			{
+				avgPosition /= (numNeighbours);
+				avgVelocity /= (numNeighbours);
+				avgPush /= numNeighbours;
+			}
+			else
+			{
+				Vector3 avgPosition = Vector3(0.0f);
+				Vector3 avgVelocity = Vector3(0.0f);
+				Vector3 avgPush = Vector3(0.0f);
+			}
 
 			Vector3 steer = Vector3(0.0f);
 
@@ -153,8 +212,82 @@ public:
 			// separation
 			steer += 1.0f * avgPush;
 
+			//avoid obstacle
+
+				//get obstacles info
+			Vector3 avgAvoidPosition = Vector3(0.0f, 0.0f, 0.0f);
+			int nearbyObstacles{};
+
+			Vector3 dirToClosestObstacle = m_obstaclesData[0].get_position() - m_positions[i];
+
+
+			for (int j = 0; j < m_numObstacles; j++)
+			{
+				
+				const Vector3 dirToObstacle = m_obstaclesData[j].get_position() - m_positions[i];
+
+				float distanceToObstacle = length(dirToObstacle) - m_obstaclesData[j].get_radious()*1.75f;
+
+				if ((distanceToObstacle) < 0.001f)
+					distanceToObstacle = 0.001f;
+				
+				if (distanceToObstacle < length(dirToClosestObstacle))
+					dirToClosestObstacle = dirToObstacle;
+
+				if (distanceToObstacle < boxCollisionLength)
+				{
+					float angleToObstacle = dot(m_velocities[i], normalize(dirToObstacle));
+
+					//if obstacle is in the way, try avoid it
+					if (angleToObstacle > 0.55f)
+					{
+						dwgDebugLine(m_positions[i], m_positions[i] + dirToObstacle, Vector3(0.1f, 0.3f, 0.0f));
+
+
+						//force away from obstacles
+						float multipler = 1.0f + (boxCollisionLength - dirToObstacle.getX())
+							/ boxCollisionLength;
+
+
+						if ((distanceToObstacle) < 0.001f)
+							distanceToObstacle = 0.001f;
+
+						avgAvoidPosition += -dirToObstacle / (
+							distanceToObstacle * distanceToObstacle
+							) * multipler;
+						
+						nearbyObstacles++;
+					}
+				}
+			}
+
+			if (nearbyObstacles > 0)
+			{
+				avgAvoidPosition /= nearbyObstacles;
+
+				steer = steer * 0.5f;
+
+				steer += avgAvoidPosition * 0.5f;
+
+				//add max force against closest obstacle
+				double multipler = 1.0f + (boxCollisionLength - dirToClosestObstacle.getX()) / boxCollisionLength;
+
+				//!!
+				//steer = Vector3(0, 0, 0);
+
+				//y
+				steer += Vector3(0.0f, dirToClosestObstacle.getY()  * multipler, 0.0f);
+
+				const double brakingWeight = 0.3f;
+
+				steer += Vector3(dirToClosestObstacle.getX() * brakingWeight, 0.0f, 0.0f);
+
+			}
+
+
 			// apply steering
-			m_velocities[i] += steer;
+			m_velocities[i] += Vector3(unifs(steer.getX()), steer.getY(), steer.getZ());
+			
 
 			// clamp velocity to max speed
 			if (length(m_velocities[i]) > maxPreySpeed)
@@ -162,6 +295,18 @@ public:
 				m_velocities[i] = normalize(m_velocities[i]) * maxPreySpeed;
 			}
 		}
+
+
+
+
+
+
+
+
+
+
+
+
 
 		// iterate over all predators (steering for predators)
 		int numPrey = m_numPrey;
@@ -216,16 +361,24 @@ public:
 
 	void draw()
 	{
+		//draw prey
 		for (int i = 0; i < m_numPrey; ++i)
 		{
 			dwgDebugSphere(m_positions[i], Vector3(0.04f), Vector3(0.2f, 1.0f, 1.0f));
 			dwgDebugLine(m_positions[i], m_positions[i] + m_velocities[i] * 0.04f, Vector3(0.2f, 1.0f, 1.0f));
 		}
 
+		//draw predators
 		for (int i = m_numPrey; i < m_numAll; ++i)
 		{
 			dwgDebugSphere(m_positions[i], Vector3(0.04f), Vector3(1.0f, 0.2f, 0.2f));
 			dwgDebugLine(m_positions[i], m_positions[i] + m_velocities[i] * 0.04f, Vector3(1.0f, 0.2f, 0.2f));
+		}
+
+		// draw obstacles
+		for (int i = 0; i < m_numObstacles; i++)
+		{
+			m_obstaclesData[i].draw();
 		}
 	}
 
@@ -237,6 +390,9 @@ private:
 	int m_numPrey = 0;
 	int m_numPredators = 0;
 	int m_numAll = 0;
+
+	Obstacle* m_obstaclesData = nullptr;
+	int m_numObstacles = 0;
 };
 
 
@@ -250,7 +406,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 		return 1;
 
 
-	Flock flock(50, 10);
+	Flock flock(2, 0, 20);
 
 	// main game loop, each iteration is a single frame
 	while (!dwgShouldClose())
